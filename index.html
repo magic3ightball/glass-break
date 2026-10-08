@@ -388,17 +388,25 @@ var GLP = {
   thick:       {tilt:0.16, tiltF:0.34, refr:150, bw:9,  ba:0.55, ca:0.16, line:0.95, edge:0.35, spec:1.1, tint:[0.72,0.92,0.84], ecol:[0.30,0.80,0.60]}
 };
 var GL_VS = [
- 'attribute vec2 aPos; attribute vec2 aCtr; attribute vec3 aBn; attribute vec4 aTl; attribute vec2 aRot;',
- 'uniform vec2 uRes; varying vec2 vPos, vCtr, vBn, vRot; varying float vD; varying vec3 vTl; varying float vA;',
- 'void main(){ vRot=aRot; vPos=aPos; vCtr=aCtr; vBn=aBn.xy; vD=aBn.z; vTl=aTl.xyz; vA=aTl.w;',
+ 'attribute vec2 aPos; attribute vec2 aCtr; attribute vec3 aBn; attribute vec4 aTl; attribute vec2 aRot; attribute vec3 aFr;',
+ 'uniform vec2 uRes; varying vec2 vPos, vCtr, vBn, vRot; varying float vD; varying vec3 vTl; varying float vA; varying vec3 vFr;',
+ 'void main(){ vFr=aFr; vRot=aRot; vPos=aPos; vCtr=aCtr; vBn=aBn.xy; vD=aBn.z; vTl=aTl.xyz; vA=aTl.w;',
  ' gl_Position = vec4(aPos.x/uRes.x*2.0-1.0, 1.0-aPos.y/uRes.y*2.0, 0.0, 1.0); }'
 ].join('\n');
 var GL_FS = [
  'precision highp float;',
  'uniform sampler2D uBg; uniform vec2 uRes; uniform float uRefr, uBW, uBA, uCA, uEdge, uLine, uSpec, uGrain, uGS, uMilk; uniform vec3 uTint, uEcol;',
- 'varying vec2 vPos, vCtr, vBn, vRot; varying float vD; varying vec3 vTl; varying float vA;',
+ 'varying vec2 vPos, vCtr, vBn, vRot; varying float vD; varying vec3 vTl; varying float vA; varying vec3 vFr;',
  'float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)))*43758.5453); }',
  'void main(){',
+ ' vec2 rv = vPos - vFr.xy; float dist = length(rv);',
+ ' float an = abs(dot(vBn, rv/max(dist, 0.001)));',      // 0 = 방사형 금(바깥으로 뻗는 금), 1 = 고리 금
+ ' float frL = vFr.z - dist*(1.0 + 0.5*an);',             // 방사형 금이 먼저 뻗고 고리 금은 뒤따라 이어짐
+ ' float frB = vFr.z - dist*1.6;',                        // 조각 면(굴절 어긋남)은 금이 둘러싼 뒤에 드러남
+ ' float revL = smoothstep(0.0, 8.0, frL), revB = smoothstep(0.0, 24.0, frB);',
+ ' float lmask = 1.0 - smoothstep(0.5, 2.6, vD);',
+ ' if(revB <= 0.0 && revL*lmask <= 0.0) discard;',
+ ' float tip = exp(-frL*frL/350.0)*revL;',                // 금 끝(앞머리)이 밝게 빛남
  ' float edgeM = 1.0 - smoothstep(0.0, uBW, vD);',
  ' vec2 tl = vTl.xy + vBn*edgeM*uBA + vTl.z*(vPos - vCtr)*0.0035;',
  ' if(uGrain > 0.0){',
@@ -408,6 +416,7 @@ var GL_FS = [
  '  vec2 gt = vec2(hash(bid+3.1), hash(bid+9.7)) - 0.5;',
  '  tl += vec2(gt.x*vRot.x - gt.y*vRot.y, gt.x*vRot.y + gt.y*vRot.x)*uGrain*2.0;',
  ' }',
+ ' tl *= revB;',
  ' vec2 off = tl*uRefr; vec2 px = vec2(1.0)/uRes;',
  ' vec3 c;',
  ' c.r = texture2D(uBg, (vPos + off*(1.0+uCA))*px).r;',
@@ -423,10 +432,12 @@ var GL_FS = [
  ' c = c*(1.0-F) + env*F*1.3 + vec3(sp*uSpec);',
  ' float lit = dot(vBn, normalize(vec2(-0.45,-0.6)))*0.5 + 0.5;',
  ' c += uEcol*edgeM*uEdge*(0.25 + 0.9*lit);',
- ' float line = 1.0 - smoothstep(0.35, 1.35, vD);',
+ ' float line = (1.0 - smoothstep(0.35, 1.35, vD))*revL;',
  ' c *= 1.0 - line*uLine*0.55*(1.0-lit);',
  ' c = mix(c, vec3(0.96,0.98,1.0), line*uLine*(0.30 + 0.70*lit));',
- ' gl_FragColor = vec4(c*vA, vA);',
+ ' c += vec3(0.85,0.93,1.0)*lmask*tip*1.0;',
+ ' float a = vA*max(revB, lmask*revL);',
+ ' gl_FragColor = vec4(c*a, a);',
  '}'
 ].join('\n');
 function glShader(type, src){
@@ -473,14 +484,14 @@ function sHash2(s){
 function glPush(n){ // ensure capacity for n more floats
   if(glCount + n > glData.length){ var nd = new Float32Array(Math.max(glData.length*2, glCount + n)); nd.set(glData.subarray(0, glCount)); glData = nd; }
 }
-var glCount = 0, glScale = 1;
+var glCount = 0, glScale = 1, gFx = 0, gFy = 0, gFr = 1e5;
 function glTri(p0x,p0y,p1x,p1y,cx,cy,nx,ny,h,tx,ty,ln,al,rc,rs){
-  glPush(39);
+  glPush(48);
   var d = glData, k = glCount;
-  // vertex: pos2 ctr2 bn3(nx,ny,d) tl4(tx,ty,lens,alpha) rot2
-  d[k++]=p0x; d[k++]=p0y; d[k++]=cx; d[k++]=cy; d[k++]=nx; d[k++]=ny; d[k++]=0; d[k++]=tx; d[k++]=ty; d[k++]=ln; d[k++]=al; d[k++]=rc; d[k++]=rs;
-  d[k++]=p1x; d[k++]=p1y; d[k++]=cx; d[k++]=cy; d[k++]=nx; d[k++]=ny; d[k++]=0; d[k++]=tx; d[k++]=ty; d[k++]=ln; d[k++]=al; d[k++]=rc; d[k++]=rs;
-  d[k++]=cx;  d[k++]=cy;  d[k++]=cx; d[k++]=cy; d[k++]=nx; d[k++]=ny; d[k++]=h; d[k++]=tx; d[k++]=ty; d[k++]=ln; d[k++]=al; d[k++]=rc; d[k++]=rs;
+  // vertex: pos2 ctr2 bn3(nx,ny,d) tl4(tx,ty,lens,alpha) rot2 fr3(앞머리 x,y,반지름)
+  d[k++]=p0x; d[k++]=p0y; d[k++]=cx; d[k++]=cy; d[k++]=nx; d[k++]=ny; d[k++]=0; d[k++]=tx; d[k++]=ty; d[k++]=ln; d[k++]=al; d[k++]=rc; d[k++]=rs; d[k++]=gFx; d[k++]=gFy; d[k++]=gFr;
+  d[k++]=p1x; d[k++]=p1y; d[k++]=cx; d[k++]=cy; d[k++]=nx; d[k++]=ny; d[k++]=0; d[k++]=tx; d[k++]=ty; d[k++]=ln; d[k++]=al; d[k++]=rc; d[k++]=rs; d[k++]=gFx; d[k++]=gFy; d[k++]=gFr;
+  d[k++]=cx;  d[k++]=cy;  d[k++]=cx; d[k++]=cy; d[k++]=nx; d[k++]=ny; d[k++]=h; d[k++]=tx; d[k++]=ty; d[k++]=ln; d[k++]=al; d[k++]=rc; d[k++]=rs; d[k++]=gFx; d[k++]=gFy; d[k++]=gFr;
   glCount = k;
 }
 function glShard(s, pts, cx, cy, tx, ty, ln, al, rc, rs){
@@ -503,6 +514,7 @@ function glRender(){
       if(s.vis <= 0.01) continue;
       sHash2(s);
       var am = P.tilt*s.tm;
+      gFx = s.fx; gFy = s.fy; gFr = Math.min(1e5, (gt - s.ft)/s.fk);
       glShard(s, s.pts, s.cx, s.cy, Math.cos(s.t0)*am, Math.sin(s.t0)*am, s.ln, Math.min(1, s.vis), 1, 0);
       drawn++;
     } else if(s.state === 1){
@@ -512,6 +524,7 @@ function glRender(){
         var x = lp[j][0]*s.sc, y = lp[j][1]*s.sc;
         wp.push([s.x + x*ca - y*sa, s.y + x*sa + y*ca]);
       }
+      gFr = 1e5;
       var am2 = P.tiltF*s.tm*(0.65 + 0.35*Math.cos(s.a*2 + s.t0));
       var tt = s.t0 + s.a;                                 // 회전하면서 기울기 방향도 같이 돈다
       var al = clamp(1 - Math.max(0, s.y - H*0.9)/(H*0.3), 0.25, 1);
@@ -526,8 +539,8 @@ function glRender(){
   gl.useProgram(glProg);
   gl.bindBuffer(gl.ARRAY_BUFFER, glBuf);
   gl.bufferData(gl.ARRAY_BUFFER, glData.subarray(0, glCount), gl.DYNAMIC_DRAW);
-  var stride = 52;
-  var A = [['aPos',2,0],['aCtr',2,8],['aBn',3,16],['aTl',4,28],['aRot',2,44]];
+  var stride = 64;
+  var A = [['aPos',2,0],['aCtr',2,8],['aBn',3,16],['aTl',4,28],['aRot',2,44],['aFr',3,52]];
   for(i=0;i<A.length;i++){
     var loc = gl.getAttribLocation(glProg, A[i][0]);
     gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, A[i][1], gl.FLOAT, false, stride, A[i][2]);
@@ -537,7 +550,7 @@ function glRender(){
   gl.uniform1f(glU.uRefr, P.refr); gl.uniform1f(glU.uBW, P.bw); gl.uniform1f(glU.uBA, P.ba); gl.uniform1f(glU.uCA, P.ca);
   gl.uniform1f(glU.uGrain, P.grain||0); gl.uniform1f(glU.uGS, P.gs||6); gl.uniform1f(glU.uMilk, P.milk||0); gl.uniform1f(glU.uEdge, P.edge); gl.uniform1f(glU.uLine, P.line); gl.uniform1f(glU.uSpec, P.spec);
   gl.uniform3f(glU.uTint, P.tint[0], P.tint[1], P.tint[2]); gl.uniform3f(glU.uEcol, P.ecol[0], P.ecol[1], P.ecol[2]);
-  gl.drawArrays(gl.TRIANGLES, 0, glCount/13);
+  gl.drawArrays(gl.TRIANGLES, 0, glCount/16);
   return drawn;
 }
 glInit();
@@ -687,7 +700,7 @@ function makeShard(poly){
   var lp = [];
   for(m=0;m<n2;m++) lp.push([poly[m][0]-ccx, poly[m][1]-ccy]);
   return {pts:poly, lp:lp, cx:ccx, cy:ccy, rad:Math.sqrt(Math.abs(A)/Math.PI), area:Math.abs(A), vis:0, state:0, held:false,
-          glint:(Math.random()*n2)|0, pi:(Math.random()*6)|0, tint:0.07 + Math.random()*0.09, x:0,y:0,a:0,vx:0,vy:0,vr:0,sc:1,zk:0,age:0,landed:false};
+          glint:(Math.random()*n2)|0, pi:(Math.random()*6)|0, tint:0.07 + Math.random()*0.09, x:0,y:0,a:0,vx:0,vy:0,vr:0,sc:1,zk:0,age:0,landed:false, fx:0,fy:0,ft:-1e9,fk:0.00085,relAt:0};
 }
 function clipRect(poly){
   var x0 = pane.x, y0 = pane.y, x1 = pane.x + pane.w, y1 = pane.y + pane.h;
@@ -1114,7 +1127,7 @@ function shatterAll(x, y, S, t){
     var s = shards[i]; if(s.state !== 0) continue;
     var d = Math.hypot(s.cx-x, s.cy-y);
     // 1단계: 전체에 잔금이 번짐 (조각은 서로 맞물려 제자리에 있음)
-    pending.push({s:s, add:0.98, at:t + d*0.0007, hx:x, hy:y, S:1, f:0.2, punch:false});
+    pending.push({s:s, add:0.98, at:crackAt(s, x, y, t, 0.0007), hx:x, hy:y, S:1, f:0.2, punch:false});
     // 2단계: 잠시 뒤 맞물림이 풀리며 와르르 쏟아짐
     pending.push({s:s, add:0.1, at:t + 0.6 + Math.random()*0.35 + d*0.0003, hx:x, hy:y, S:Math.max(S,1.4)*0.7,
                   f:clamp(1 - d/(diag*0.8), 0.2, 1)*0.6, punch:false});
@@ -1128,6 +1141,16 @@ function shatterAll(x, y, S, t){
   }
 }
 
+/* 균열 앞머리: 아직 금이 안 보이는 조각은 타격점에서 퍼지는 앞머리(반지름 = 지난 시간/k)에 닿은 픽셀부터 금이 보임 (셰이더에서 계산)
+ * k = 1px 가는 데 걸리는 게임 시간(초). 반환값은 앞머리가 조각 가장자리에 처음 닿는 시각 -> 그때부터 조각을 그림 */
+function crackAt(s, x, y, t, k, lag){
+  lag = lag || 0;
+  if(s.vis <= 0.01 && !(t - s.ft < 1.5)){
+    s.fx = x; s.fy = y; s.ft = t + lag; s.fk = k;
+    s.relAt = s.ft + (Math.hypot(s.cx - x, s.cy - y) + s.rad)*k*1.6 + 0.02;   // 1.6 = 셰이더의 조각 면 속도와 맞춤   // 앞머리가 조각을 다 지나간 뒤에야 떨어짐
+  }
+  return t + lag + Math.max(0, Math.hypot(s.cx - x, s.cy - y) - s.rad)*k;
+}
 function hit(x, y, S){
   x = clamp(x, pane.x+2, pane.x+pane.w-2); y = clamp(y, pane.y+2, pane.y+pane.h-2);
   if(!shards) buildShards(x, y, false, S);
@@ -1162,7 +1185,7 @@ function hit(x, y, S){
       s = shards[i]; if(s.state !== 0) continue;
       var d = Math.hypot(s.cx-x, s.cy-y); if(d > reach) continue;
       var f = 1 - d/reach;
-      pending.push({s:s, add:S*1.25*f*(0.85 + Math.random()*0.3)*G.dmg, at:t + d*0.00085, hx:x, hy:y, S:S, f:f, punch:punch});
+      pending.push({s:s, add:S*1.25*f*(0.85 + Math.random()*0.3)*G.dmg, at:crackAt(s, x, y, t, 0.00085), hx:x, hy:y, S:S, f:f, punch:punch});
     }
   }
   flashes.push({x:x, y:y, t:t, S:S});
@@ -1197,7 +1220,7 @@ function crater(x, y, R, S, t){
   for(var i=0;i<shards.length;i++){
     var s = shards[i]; if(s.state !== 0) continue;
     var d = Math.hypot(s.cx - x, s.cy - y); if(d > R) continue;
-    pending.push({s:s, add:2.5, at:t + 0.02 + d*0.001, hx:x, hy:y, S:Math.max(S, 1.2), f:clamp(1 - 0.2*d/R, 0, 1), punch:true});
+    pending.push({s:s, add:2.5, at:crackAt(s, x, y, t, 0.001, 0.02), hx:x, hy:y, S:Math.max(S, 1.2), f:clamp(1 - 0.2*d/R, 0, 1), punch:true});
   }
   spawnPuff(x, y, 40);
 }
@@ -1206,7 +1229,7 @@ function collapseAll(x, y, S, t){
   for(var i=0;i<shards.length;i++){
     var s = shards[i]; if(s.state !== 0) continue;
     var d = Math.hypot(s.cx - x, s.cy - y);
-    pending.push({s:s, add:3, at:t + 0.05 + d*0.0009, hx:x, hy:y, S:1.1, f:G.hold ? 0.9 : 0.3*(1 - 0.4*d/diag), punch:true});
+    pending.push({s:s, add:3, at:crackAt(s, x, y, t, 0.0009, 0.05), hx:x, hy:y, S:1.1, f:G.hold ? 0.9 : 0.3*(1 - 0.4*d/diag), punch:true});
   }
   spawnPuff(x, y, 60);
 }
@@ -1383,6 +1406,7 @@ function update(t, dt){
         s.vis = 1;
         if(!s.held){ s.held = true; heldCount++; }
       } else if(s.vis >= relThresh()){
+        if(t < s.relAt){ p.add = 0; p.at = s.relAt; pending.push(p); continue; }   // 금이 끝까지 번진 다음 떨어짐
         releaseShard(s, p); rel++; relPan += s.cx; relS = Math.max(relS, p.S);
       }
     }
