@@ -158,6 +158,7 @@ var shakeAmt = 0, broken = 0, heldCount = 0, stress = 0;
 var fade = 1, refillAt = 0, lastHit = 0;
 var shAcc = 0, shT = 0, shPan = 0, shS = 1;
 var integrity = 1, lastHitPos = null;
+var flaw = null, hitsN = 0, leans = [], lastResult = '';   // 숨은 흠 · 이번 유리에 친 횟수 · 흠 쪽으로 기우는 잔금
 var objId = 'pane', parts = null, objGeo = null, popped = false, flashA = 0, OS = 1;   // 깨질 대상(모양)      // 안정도(1=멀쩡) -> 낮아질수록 단계가 올라감
 var downs = {}, ptrs = {}, cuts = {}, cutAccs = {};      // 포인터(손가락)별 상태 -> 멀티터치
 var ptr = {x:0,y:0}, hasPtr = false, touchMode = false;
@@ -1087,21 +1088,23 @@ function rebuildIntact(){
 /* --------------------------------------------------------------- state */
 function updateCount(){
   if(!shards){ countEl.textContent = ''; return; }
-  countEl.textContent = '단계 ' + STAGES[stageOf(integrity)] + ' · 안정도 ' + Math.round(integrity*100) + '% · ' +
-    (G.hold ? ('금 간 조각 ' + (heldCount + broken)) : ('떨어진 조각 ' + broken)) + ' / ' + shards.length;
+  var b = getBest();
+  countEl.textContent = '단계 ' + STAGES[stageOf(integrity)] + ' · 친 횟수 ' + hitsN + (b ? ' · 최고 ' + b + '번' : '');
 }
 function setHint(){
-  hintEl.innerHTML = '<b>' + (objId === 'pane' ? '' : OBJ[objId].name + ' · ') + G.name + '</b><small>' + G.sub + '</small>';
+  hintEl.innerHTML = '<b>' + (objId === 'pane' ? '' : OBJ[objId].name + ' · ') + G.name + '</b><small>' + G.sub + '<br>유리마다 숨은 흠이 하나 있어요 · 칠 때마다 주황빛 금이 흠 쪽으로 기울어요 · 찾았으면 꾹 눌러 한 방에</small>';
 }
 function newGlass(){
   shards = null; pending = []; flashes = []; sparks = []; marks = []; balls = []; waves = [];
   broken = 0; heldCount = 0; stress = 0; shakeAmt = 0; shAcc = 0; cuts = {}; downs = {}; centers = []; dust = []; integrity = 1; lastHitPos = null;
   intactDirty = true; fade = 1; refillAt = 0; popped = false; flashA = 0;
+  flaw = pickFlaw(); hitsN = 0; leans = [];
   setHint(); hintEl.style.opacity = 1; updateCount();
 }
 // 다 깨지면 자동으로 새 유리를 서서히 채움
 function refill(){
   newGlass(); fade = 0; hintEl.style.opacity = 0;
+  if(lastResult){ hintEl.innerHTML = lastResult; hintEl.style.opacity = 1; lastResult = ''; }
   if(ac && !muted){ ping(5200, 0.6, 0.035, 0, 0); ping(6900, 0.5, 0.025, 0, 0.08); }
 }
 function setup(){
@@ -1151,6 +1154,62 @@ function crackAt(s, x, y, t, k, lag){
   }
   return t + lag + Math.max(0, Math.hypot(s.cx - x, s.cy - y) - s.rad)*k;
 }
+/* ------------------------------------------------ 숨은 흠: 유리는 가장 큰 흠에서 깨진다(그리피스). 가장자리·모서리 흠이 흔함.
+ * 유리마다 흠 하나를 숨겨 두고, 칠 때마다 흠 쪽으로 기우는 잔금과 높아지는 삐걱 소리로 위치를 알려 준다.
+ * 흠 가까이를 칠수록 힘이 세게 먹히고, 흠을 세게(차지) 치면 한 방에 무너진다. 목표: 적은 횟수로 깨기. */
+function edgeDist(P, x, y){ var m = 1e9; for(var i=0;i<P.length;i++){ var a = P[i], b = P[(i+1)%P.length]; m = Math.min(m, ptSeg(x, y, a[0], a[1], b[0], b[1])); } return m; }
+function pickFlaw(){
+  var edge = Math.random() < 0.65, m = Math.min(pane.w, pane.h), best = null, bd = 1e9;
+  for(var n=0;n<40;n++){
+    var x = pane.x + pane.w*(0.05 + 0.9*Math.random()), y = pane.y + pane.h*(0.05 + 0.9*Math.random()), d;
+    if(parts){
+      var inside = false; d = 1e9;
+      for(var k=0;k<parts.length;k++){ if(inPoly(parts[k], x, y)) inside = true; d = Math.min(d, edgeDist(parts[k], x, y)); }
+      if(!inside) continue;
+    } else d = Math.min(x - pane.x, pane.x + pane.w - x, y - pane.y, pane.y + pane.h - y);
+    if(!edge) return {x:x, y:y};
+    if(d > m*0.04 && d < bd){ bd = d; best = {x:x, y:y}; }
+  }
+  return best || {x:pane.x + pane.w*0.5, y:pane.y + pane.h*0.5};
+}
+function refreshFlaw(){        // 흠 자리가 떨어져 나가면, 남은 유리 중 가장 가까운 깨진 가장자리가 새 흠이 됨
+  if(!flaw || !shards) return;
+  var i, s, bd = 1e9, bs = null;
+  for(i=0;i<shards.length;i++){ s = shards[i]; if(s.state !== 0) continue; if(inPoly(s.pts, flaw.x, flaw.y)) return; }
+  for(i=0;i<shards.length;i++){
+    s = shards[i]; if(s.state !== 0) continue;
+    var d = Math.hypot(s.cx - flaw.x, s.cy - flaw.y); if(d < bd){ bd = d; bs = s; }
+  }
+  if(bs){ var e = edgeDist(bs.pts, flaw.x, flaw.y) > 0 ? 0.35 : 0; flaw = {x:lerp(bs.cx, flaw.x, e), y:lerp(bs.cy, flaw.y, e)}; if(!inPoly(bs.pts, flaw.x, flaw.y)) flaw = {x:bs.cx, y:bs.cy}; }
+}
+function flawProx(x, y){
+  var sg = 0.1*Math.sqrt(pane.w*pane.h), d = Math.hypot(x - flaw.x, y - flaw.y);
+  return Math.exp(-d*d/(2*sg*sg));
+}
+function addLean(x, y, pr){
+  if(!flaw) return;
+  var a = Math.atan2(flaw.y - y, flaw.x - x), d = Math.hypot(flaw.x - x, flaw.y - y);
+  var len = Math.min(d + 6, clamp(d*0.35, 22*S0, 170*S0)), pts = [], n = 5;   // 멀수록 길게 기울어 방향을 알려 주고, 가까움은 밝기·소리로
+  for(var i=0;i<=n;i++){
+    var u = i/n, j = i && i < n ? (Math.random() - 0.5)*len*0.12 : 0;
+    pts.push([x + Math.cos(a)*len*u - Math.sin(a)*j, y + Math.sin(a)*len*u + Math.cos(a)*j]);
+  }
+  leans.push({pts:pts, t:gt, pr:pr}); if(leans.length > 8) leans.shift();
+}
+function sFlaw(pr, pan){        // 흠에 가까울수록 높고 길게 삐걱
+  if(!ac || muted || pr < 0.08) return;
+  var f = (260 + 1100*pr)*(G.pf || 1);
+  tone({f:f, f2:f*0.72, dur:0.08 + 0.22*pr, g:0.012 + 0.045*pr, type:'triangle', pan:pan, t:0.03});
+  if(pr > 0.4) noise({t:0.03, dur:0.05 + 0.1*pr, f:2600 + 3000*pr, q:6, g:0.03 + 0.05*pr, pan:pan});
+}
+function getBest(){ try{ return +localStorage.getItem('gb-best-' + objId + '-' + glassId) || 0; }catch(e){ return 0; } }
+function recordClear(){
+  if(!hitsN) return;
+  var best = getBest(), nb = !best || hitsN < best;
+  if(nb){ try{ localStorage.setItem('gb-best-' + objId + '-' + glassId, hitsN); }catch(e){} }
+  lastResult = '<b>' + hitsN + '번 만에 깼어요' + (nb && best ? ' · 새 기록!' : '') + '</b><small>' +
+    (nb ? (best ? '이전 최고 ' + best + '번' : '이 조합의 첫 기록') : '최고 기록 ' + best + '번') + ' · 새 유리엔 흠이 다른 데 숨어 있어요</small>';
+}
 function hit(x, y, S){
   x = clamp(x, pane.x+2, pane.x+pane.w-2); y = clamp(y, pane.y+2, pane.y+pane.h-2);
   if(!shards) buildShards(x, y, false, S);
@@ -1163,13 +1222,22 @@ function hit(x, y, S){
   if(!onGlass && near > 70*S0*S) return false;
   if(!G.tempered) localSplit(x, y, S);
   var t = gt, pan = clamp((x/W)*2-1, -1, 1)*0.8;
+  hitsN++;
+  refreshFlaw();
+  var pr = flaw ? flawProx(x, y) : 0, Sb = Math.min(S, T.p || S);
+  var Se = Sb*(0.55 + 2.0*pr) + (S - Sb)*(0.15 + 2.4*pr);     // 면 한가운데는 단단해 힘이 반쯤만 먹히고, 모은 힘(차지)은 흠 근처에서만 제대로 먹힘
+  var burst = pr > 0.55 && Se >= 3.4;                          // 흠을 제대로 세게 치면 한 방에 무너짐
+  addLean(x, y, pr);
+  sFlaw(pr, pan);
   lastHit = t;
   hintEl.style.opacity = 0;
 
+  var tAdd = Se*(0.5 + 0.5*pr);                                 // 강화유리 면은 아주 단단해 흠에서 먼 힘은 반만 쌓임
+  var tBreak = G.tempered && (stress + tAdd >= 2.6 || burst || (S >= 2.0 && pr > 0.25));   // 강화유리: 면 가운데는 단단하고 흠·가장자리에서 터짐
   if(G.tempered){
-    stress += S;
+    stress += tAdd;
     spawnPuff(x, y, clamp(Math.round(6 + 10*S), 6, 30));
-    if(stress >= 2.6 || S >= 2.0){
+    if(tBreak){
       integrity = 0;
       shatterAll(x, y, S, t);
     } else {
@@ -1178,14 +1246,15 @@ function hit(x, y, S){
       sTick(pan);
     }
   } else {
-    damage(x, y, S, t, pan);
-    var reach = (130 + 210*S)*S0*G.reach*T.reach*OS;
-    var punch = S >= 2.0;
+    if(burst){ integrity = 0; lastHitPos = {x:x, y:y}; collapseAll(x, y, Se, t); sCreak(pan); flashA = Math.max(flashA, 0.18); }
+    else damage(x, y, Se, t, pan);
+    var reach = (130 + 210*Math.min(Se, 4))*S0*G.reach*T.reach*OS;
+    var punch = Se >= 2.0;
     for(i=0;i<shards.length;i++){
       s = shards[i]; if(s.state !== 0) continue;
       var d = Math.hypot(s.cx-x, s.cy-y); if(d > reach) continue;
       var f = 1 - d/reach;
-      pending.push({s:s, add:S*1.25*f*(0.85 + Math.random()*0.3)*G.dmg, at:crackAt(s, x, y, t, 0.00085), hx:x, hy:y, S:S, f:f, punch:punch});
+      pending.push({s:s, add:Se*1.25*f*(0.85 + Math.random()*0.3)*G.dmg, at:crackAt(s, x, y, t, 0.00085), hx:x, hy:y, S:S, f:f, punch:punch});
     }
   }
   flashes.push({x:x, y:y, t:t, S:S});
@@ -1196,9 +1265,9 @@ function hit(x, y, S){
     sparks.push({x:x, y:y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp - 60*S0, life:0.35 + Math.random()*0.35, age:0});
   }
   shakeAmt = Math.max(shakeAmt, (3 + 5*S)*T.shake*G.shake);
-  if(!G.tempered || stress >= 2.6 || S >= 2.0) sHit(S, pan);
+  if(!G.tempered || tBreak) sHit(S, pan);
   if(navigator.vibrate){ try{ navigator.vibrate(10 + Math.round(S*8)); }catch(e){} }
-  if(G.tempered && (stress >= 2.6 || S >= 2.0)) juiceHit(Math.max(S, 2.0), x, y); else juiceHit(S, x, y);
+  if(burst || tBreak) juiceHit(Math.max(Se, 2.0), x, y); else juiceHit(S, x, y);
   updateCount();
   return true;
 }
@@ -1442,6 +1511,7 @@ function update(t, dt){
   }
   for(i=flashes.length-1;i>=0;i--){ if(t - flashes[i].t > 0.35) flashes.splice(i,1); }
   for(i=waves.length-1;i>=0;i--){ if(t - waves[i].t > WAVE_DUR) waves.splice(i,1); }
+  for(i=leans.length-1;i>=0;i--){ if(t - leans[i].t > LEAN_DUR) leans.splice(i,1); }
 
   // 공: 날아와서 부딪히고, 부딪힌 뒤엔 튕겨 떨어짐
   for(i=balls.length-1;i>=0;i--){
@@ -1498,7 +1568,7 @@ function update(t, dt){
     if(refillAt === 0){
       var live = 0;
       for(i=0;i<shards.length;i++){ if(shards[i].state !== 2){ live++; break; } }
-      if(live === 0) refillAt = t + 0.9;          // 조각이 전부 사라진 뒤 잠깐 쉬었다가
+      if(live === 0){ refillAt = t + 0.9; recordClear(); }          // 조각이 전부 사라진 뒤 잠깐 쉬었다가
     } else if(t >= refillAt){
       refill();
     }
@@ -1695,7 +1765,19 @@ function draw(t){
     ctx.strokeStyle = 'rgba(255,255,255,' + (0.5*(1-k)).toFixed(3) + ')'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.arc(f.x, f.y, (30 + 170*f.S)*S0*k, 0, 6.283); ctx.stroke();
   }
-  ctx.lineCap = 'round';
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  for(i=0;i<leans.length;i++){       // 흠 쪽으로 기우는 잔금: 금 앞머리처럼 뻗었다가 사라짐
+    var ln = leans[i], lk = (t - ln.t)/LEAN_DUR, grow = clamp((t - ln.t)/0.25, 0, 1), np = ln.pts.length;
+    var la = (0.55 + 0.45*ln.pr)*(1 - lk*lk);
+    ctx.beginPath(); ctx.moveTo(ln.pts[0][0], ln.pts[0][1]);
+    var lend = grow*(np - 1), lj = Math.floor(lend);
+    for(j=1;j<=lj;j++) ctx.lineTo(ln.pts[j][0], ln.pts[j][1]);
+    if(lj < np - 1){ var fr2 = lend - lj, pa = ln.pts[lj], pb = ln.pts[lj+1]; ctx.lineTo(lerp(pa[0], pb[0], fr2), lerp(pa[1], pb[1], fr2)); }
+    ctx.globalCompositeOperation = 'lighter';                 // 일반 금(흰색)과 구별되게 따뜻한 빛으로 달아오름
+    ctx.strokeStyle = 'rgba(255,170,70,' + (0.45*la).toFixed(3) + ')'; ctx.lineWidth = 7 + 5*ln.pr; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,215,150,' + (0.8*la).toFixed(3) + ')'; ctx.lineWidth = 2.2 + 1.5*ln.pr; ctx.stroke();
+    ctx.globalCompositeOperation = 'source-over';
+  }
   for(i=0;i<sparks.length;i++){
     var sp = sparks[i], al2 = 1 - sp.age/sp.life;
     ctx.strokeStyle = 'rgba(255,255,255,' + al2.toFixed(2) + ')'; ctx.lineWidth = 1.4;
@@ -1735,7 +1817,7 @@ function draw(t){
 /* ------------------------------------------------ 누르는 순간 반응: 눌린 자리가 휘고, 치면 충격파가 퍼짐
  * 둘 다 유리 뒤 배경을 중심 기준으로 살짝 줄이거나 키워서 다시 그리는 방식이라 굴절을 끈 2D 경로에서도 보인다.
  * 아직 붙어 있는 유리(intactPath) 안에서만 그려서, 금으로 끊긴 곳에서는 충격파가 멈춘다. */
-var WAVE_DUR = 0.34;
+var WAVE_DUR = 0.34, LEAN_DUR = 2.4;
 function lensAt(x, y, z){
   ctx.translate(x, y); ctx.scale(z, z); ctx.translate(-x, -y);
   ctx.drawImage(bg, 0, 0, W, H);
@@ -1890,7 +1972,7 @@ window.addEventListener('resize', function(){
   setup();
 });
 
-window.glassTest = { bench: function(){ function T(f,n){var t=performance.now();for(var i=0;i<n;i++)f();return +((performance.now()-t)/n).toFixed(1);} var o={}; if(glOK){ o.build=T(function(){ glRender(); },5); o.drawImg=T(function(){ var gh=Math.round(glcv.height*glScale); ctx.drawImage(glcv,0,glcv.height-gh,Math.round(glcv.width*glScale),gh,0,0,W,H); },5);} o.full=T(function(){ draw(performance.now()/1000); },5); var r=JUICE.refr; JUICE.refr=false; o.full_no_gl=T(function(){ draw(performance.now()/1000); },5); JUICE.refr=r; o.ok=glOK; return o; }, get obj(){ return objId; }, get bbox(){ return pane; }, stats: function(){ var a = shards.map(function(q){ return q.area; }).sort(function(x,y){ return x-y; }); var el = shards.map(function(q){ var mnx=1e9,mxx=-1e9,mny=1e9,mxy=-1e9; q.pts.forEach(function(p){ mnx=Math.min(mnx,p[0]); mxx=Math.max(mxx,p[0]); mny=Math.min(mny,p[1]); mxy=Math.max(mxy,p[1]); }); var w=mxx-mnx, h=mxy-mny; return Math.max(w,h)/Math.max(1,Math.min(w,h)); }).sort(function(x,y){ return x-y; }); return {n:a.length, median:Math.round(a[a.length>>1]), p90:Math.round(a[Math.floor(a.length*0.9)]), max:Math.round(a[a.length-1]), elong_med:+el[el.length>>1].toFixed(2), centers:centers.length}; }, get zoom(){ return zoomAmt; }, get timeScale(){ return timeScale; }, get gt(){ return gt; }, get cut(){ return Object.keys(cuts).length > 0; }, get integrity(){ return integrity; }, get stage(){ return stageOf(integrity); }, get shards(){ return shards; }, get G(){ return G; }, get stress(){ return stress; }, get held(){ return heldCount; }, get broken(){ return broken; } };
+window.glassTest = { bench: function(){ function T(f,n){var t=performance.now();for(var i=0;i<n;i++)f();return +((performance.now()-t)/n).toFixed(1);} var o={}; if(glOK){ o.build=T(function(){ glRender(); },5); o.drawImg=T(function(){ var gh=Math.round(glcv.height*glScale); ctx.drawImage(glcv,0,glcv.height-gh,Math.round(glcv.width*glScale),gh,0,0,W,H); },5);} o.full=T(function(){ draw(performance.now()/1000); },5); var r=JUICE.refr; JUICE.refr=false; o.full_no_gl=T(function(){ draw(performance.now()/1000); },5); JUICE.refr=r; o.ok=glOK; return o; }, get obj(){ return objId; }, get bbox(){ return pane; }, stats: function(){ var a = shards.map(function(q){ return q.area; }).sort(function(x,y){ return x-y; }); var el = shards.map(function(q){ var mnx=1e9,mxx=-1e9,mny=1e9,mxy=-1e9; q.pts.forEach(function(p){ mnx=Math.min(mnx,p[0]); mxx=Math.max(mxx,p[0]); mny=Math.min(mny,p[1]); mxy=Math.max(mxy,p[1]); }); var w=mxx-mnx, h=mxy-mny; return Math.max(w,h)/Math.max(1,Math.min(w,h)); }).sort(function(x,y){ return x-y; }); return {n:a.length, median:Math.round(a[a.length>>1]), p90:Math.round(a[Math.floor(a.length*0.9)]), max:Math.round(a[a.length-1]), elong_med:+el[el.length>>1].toFixed(2), centers:centers.length}; }, get zoom(){ return zoomAmt; }, get timeScale(){ return timeScale; }, get gt(){ return gt; }, get cut(){ return Object.keys(cuts).length > 0; }, get integrity(){ return integrity; }, get stage(){ return stageOf(integrity); }, get shards(){ return shards; }, get G(){ return G; }, get stress(){ return stress; }, get held(){ return heldCount; }, get broken(){ return broken; }, get flaw(){ return flaw; }, get hits(){ return hitsN; }, get refillAt(){ return refillAt; }, get leans(){ return leans; } };
 setup();
 if(window.ResizeObserver){ var barBot = -1; new ResizeObserver(function(){ var r = document.getElementById('bar').getBoundingClientRect(); if(Math.abs(r.top - barBot) > 3){ var first = barBot < 0; barBot = r.top; if(!first) setup(); } }).observe(document.getElementById('bar')); }
 requestAnimationFrame(frame);
